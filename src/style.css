@@ -405,6 +405,11 @@ html, body {
 .touch-ui { display: none; }
 
 html.touch .touch-ui { display: block; }
+/* #hud disables pointer events for the overlay; real touches must still reach
+   the controls, so re-enable them on every interactive touch target. */
+html.touch .touch-stick,
+html.touch .touch-cluster,
+html.touch .touch-pause { pointer-events: auto; }
 html.touch .desktop-note { display: none; }
 html.touch .mobile-note { display: block; }
 html.touch .controls-card { display: none; }
