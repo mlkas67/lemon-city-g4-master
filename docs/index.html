@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Lemon City — Kukirin G4 Master</title>
+  <meta name="description" content="Cruise a 1000x living city on a Kukirin G4 Master, rob shops and pull wheelies for the cops. Playable on desktop and phone." />
+  <meta name="theme-color" content="#0b1118" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script type="module" crossorigin src="./assets/index-DFb08rxr.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-d56Tg1hO.css">
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="vignette"></div>
+
+  <div id="hud" class="hidden">
+    <header class="hud-top">
+      <div class="brand">
+        <div class="brand-mark">LC</div>
+        <div class="brand-text">
+          <b>LEMON CITY</b>
+          <span>KUKIRIN G4 MASTER</span>
+        </div>
+      </div>
+
+      <div class="wanted" aria-label="Wanted level">
+        <div class="wanted-label">WANTED</div>
+        <div id="stars" class="stars"></div>
+      </div>
+
+      <div class="cash" id="cash">
+        <span class="cash-label">CASH</span>
+        <span class="cash-value" id="cash-value">$0</span>
+      </div>
+    </header>
+
+    <div class="status-pills">
+      <div class="pill" id="mode-pill"><i class="dot"></i><span id="mode-text">ON FOOT</span></div>
+      <div class="pill hidden" id="ride-pill"><span id="ride-text">G4 MASTER</span><b id="speed-text">0</b><small>km/h</small></div>
+    </div>
+
+    <div class="minimap-wrap">
+      <canvas id="minimap" width="220" height="220"></canvas>
+      <div class="minimap-ring"></div>
+      <div class="minimap-label" id="district">DOWNTOWN</div>
+    </div>
+
+    <div id="prompt" class="prompt hidden">
+      <span class="key" id="prompt-key">E</span>
+      <span id="prompt-text">Interact</span>
+      <div class="progress" id="prompt-progress"><i></i></div>
+    </div>
+
+    <div id="wheelie-meter" class="wheelie hidden">
+      <div class="wheelie-title">WHEELIE</div>
+      <div class="wheelie-body">
+        <div class="wheelie-bar"><i id="wheelie-fill"></i></div>
+        <div class="wheelie-num" id="wheelie-angle">0°</div>
+      </div>
+      <div class="wheelie-hint">Hold <b>SPACE</b> · front wheel up</div>
+    </div>
+
+    <div id="speedo" class="speedo hidden">
+      <svg viewBox="0 0 200 120">
+        <path class="speedo-track" d="M18 106 A82 82 0 0 1 182 106" />
+        <path id="speedo-fill" class="speedo-fill" d="M18 106 A82 82 0 0 1 182 106" />
+      </svg>
+      <div class="speedo-value"><b id="speedo-num">0</b><span>km/h</span></div>
+      <div class="speedo-model">G4 MASTER</div>
+    </div>
+
+    <div id="toasts" class="toasts"></div>
+
+    <div id="touch-ui" class="touch-ui" aria-label="Touch controls">
+      <button id="touch-pause" class="touch-pause" aria-label="Pause">II</button>
+      <div id="touch-stick" class="touch-stick" aria-label="Move joystick">
+        <i id="touch-knob" class="touch-knob"></i>
+        <span>MOVE</span>
+      </div>
+      <div class="touch-cluster">
+        <button id="touch-run" class="tbtn tbtn-small"><b>RUN</b></button>
+        <button id="touch-action" class="tbtn"><b>ROB</b><span>E</span></button>
+        <button id="touch-jump" class="tbtn tbtn-main"><b id="touch-jump-label">JUMP</b><span>HOLD</span></button>
+        <button id="touch-ride" class="tbtn tbtn-accent"><b id="touch-ride-label">RIDE</b><span>F</span></button>
+      </div>
+    </div>
+
+    <div class="controls-card" id="controls-card">
+      <div class="controls-head"><b>CONTROLS</b><button id="controls-toggle" aria-label="Toggle controls">−</button></div>
+      <div class="controls-body">
+        <div><kbd>W A S D</kbd><span>Move / ride</span></div>
+        <div><kbd>MOUSE</kbd><span>Look</span></div>
+        <div><kbd>SHIFT</kbd><span>Sprint</span></div>
+        <div><kbd>SPACE</kbd><span>Jump / wheelie</span></div>
+        <div><kbd>F</kbd><span>Summon &amp; ride / get off</span></div>
+        <div><kbd>E</kbd><span>Rob shop / mount</span></div>
+        <div><kbd>M</kbd><span>Mute</span></div>
+      </div>
+    </div>
+
+    <div id="siren-flash"></div>
+    <div id="damage-flash"></div>
+  </div>
+
+  <div id="start" class="overlay">
+    <div class="start-bg"></div>
+    <div class="start-inner">
+      <div class="start-kicker">LEMON CITY PRESENTS</div>
+      <h1>G4 <span>MASTER</span></h1>
+      <p class="start-sub">A 1000&times; living city. A 4000&nbsp;W scooter. Absolutely no respect for the law.</p>
+      <div class="start-features">
+        <div><b>RIDE</b><span>Summon the Kukirin G4 Master in front of you anytime</span></div>
+        <div><b>ROB</b><span>Hit shops for cash — every score raises your wanted level</span></div>
+        <div><b>FLEX</b><span>Wheelie past a cop and watch the stars climb</span></div>
+      </div>
+      <button id="start-btn" class="start-btn">ENTER THE CITY <span>→</span></button>
+      <div class="start-note desktop-note">Click to lock the mouse · <b>ESC</b> releases it · headphones recommended</div>
+      <div class="start-note mobile-note">Drag to look · left stick to move · action buttons on the right</div>
+    </div>
+    <div class="start-credit">A browser game built with Three.js · procedural city, no downloads</div>
+  </div>
+
+  <div id="loading" class="overlay">
+    <div class="loader">
+      <div class="loader-mark">LC</div>
+      <div class="loader-bar"><i></i></div>
+      <div class="loader-text">BUILDING THE CITY…</div>
+    </div>
+  </div>
+
+  <div id="busted" class="overlay hidden">
+    <div class="busted-card">
+      <div class="busted-kicker">LCPD</div>
+      <h2>BUSTED</h2>
+      <p id="busted-text">The cops got you. Fine paid.</p>
+      <button id="busted-btn">WALK IT OFF</button>
+    </div>
+  </div>
+
+  <div id="pause" class="overlay hidden">
+    <div class="pause-card">
+      <h2>PAUSED</h2>
+      <p>Mouse released. Click to jump back in.</p>
+      <button id="resume-btn">RESUME</button>
+    </div>
+  </div>
+
+  <div id="test-results" class="hidden"></div>
+
+</body>
+</html>

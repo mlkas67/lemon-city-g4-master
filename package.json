@@ -1,0 +1,25 @@
+{
+  "name": "lemon-city-g4-master",
+  "version": "1.0.0",
+  "description": "Lemon City — a 3D open-world scooter game built with Three.js",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "threejs",
+    "game",
+    "scooter"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.8"
+  }
+}

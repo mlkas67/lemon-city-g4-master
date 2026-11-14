@@ -2,3 +2,6 @@ node_modules/
 dist/
 .agent_tmp/
 *.log
+
+# packaged downloads
+*.zip
