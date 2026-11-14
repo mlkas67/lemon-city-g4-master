@@ -1032,7 +1032,11 @@ async function runSelfTest() {
   t('throttle moves scooter', p0.distanceTo(player.position) > 1.5, p0.distanceTo(player.position).toFixed(2));
   t('speed registered', player.speed > 1, player.speed.toFixed(2));
 
-  // stage a cop ahead of the rider so the wheelie can be witnessed
+  // stage a cop ahead of the rider so the wheelie can be witnessed; keep every
+  // other cop far away so the nearest-cop check always picks the witness
+  for (const cop of crowd.cops) {
+    cop.human.root.position.set(player.position.x + 400, 0.24, player.position.z + 400);
+  }
   const witness = crowd.cops[0];
   witness.human.root.position.set(player.position.x, 0.24, player.position.z + 20);
   witness.human.root.rotation.y = Math.PI;
