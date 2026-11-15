@@ -202,12 +202,20 @@ function syncInput() {
 
 const cam = { yaw: Math.PI, pitch: 0.17, lastMouse: -9999, dist: 5.0 };
 let pointerLocked = false;
+let pointerReleasedByCtrl = false;
 
 window.addEventListener('keydown', (e) => {
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   keys.add(e.code);
   syncInput();
   if (e.repeat) return;
+  if ((e.code === 'ControlLeft' || e.code === 'ControlRight') && document.pointerLockElement === canvas) {
+    // Ctrl hands the mouse back without pausing; clicking the city locks it again.
+    pointerReleasedByCtrl = true;
+    document.exitPointerLock();
+    toast('Mouse released — click the city to lock it again', '', '🖱');
+    return;
+  }
   if (e.code === 'KeyF' && game.running && !game.paused) interactRide();
   if (e.code === 'KeyE' && game.running && !game.paused) interactAction();
   if (e.code === 'KeyM') {
@@ -223,7 +231,13 @@ canvas.addEventListener('mousedown', () => {
 });
 document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === canvas;
-  if (!MOBILE && !pointerLocked && game.running && !game.busted && !game.paused && !game.uiOpen) setPaused(true);
+  if (pointerLocked) {
+    pointerReleasedByCtrl = false;
+  } else if (pointerReleasedByCtrl) {
+    pointerReleasedByCtrl = false;
+  } else if (!MOBILE && game.running && !game.busted && !game.paused && !game.uiOpen) {
+    setPaused(true);
+  }
 });
 document.addEventListener('mousemove', (e) => {
   if (!pointerLocked) return;

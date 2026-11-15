@@ -18,7 +18,7 @@ Open the local address Vite prints (usually http://localhost:5173).
 | Input | Action |
 | --- | --- |
 | `W A S D` | Move / ride |
-| Mouse | Look (click to lock the pointer, `Esc` to release) |
+| Mouse | Look (click to lock the pointer, `Ctrl` to release it without pausing) |
 | `Shift` | Sprint |
 | `Space` | Jump / wheelie |
 | `F` | Summon the G4 Master and ride / get off |
