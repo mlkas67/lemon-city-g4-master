@@ -4,9 +4,15 @@ import { createHumanoid } from './humanoid.js';
 import { createScooter, SCOOTER, updateScooterVisual } from './scooter.js';
 import { createCrowd, nearestCop, scareCrowd } from './npc.js';
 import { GameAudio } from './audio.js';
+import { OnlineSession, cleanUsername, usernameKey } from './online.js';
+import { createNameTag } from './nametag.js';
+import { createRace, RACE } from './race.js';
 import {
   angleDiff, clamp, damp, dampAngle, dist2D, formatMoney, resolveCircleAABB,
 } from './utils.js';
+
+const USERNAME_KEY = 'lemoncity.username';
+const FRIENDS_KEY = 'lemoncity.friends';
 
 const PARAMS = new URLSearchParams(location.search);
 const TEST_MODE_EARLY = PARAMS.has('test');
@@ -147,7 +153,32 @@ const game = {
   player,
   collisions: 0,
   wheelieStars: 0,
+  mode: 'city',
+  raceState: null,
+  uiOpen: false,
+  username: '',
 };
+
+const social = {
+  username: '',
+  friends: [],
+  statuses: new Map(),
+  remotes: new Map(),
+  session: null,
+  pendingInvite: null,
+  hostVoting: false,
+  voteTimer: 0,
+  lastStateSent: 0,
+  lastRemoteUpdate: 0,
+  presenceBusy: false,
+  cityReturn: null,
+  inviteSelection: new Set(),
+};
+
+let raceWorld = null;
+let localNameTag = null;
+let nearScooter = false;
+let nearShop = null;
 
 /* ------------------------------------------------------------------ */
 /* Input                                                               */
@@ -192,7 +223,7 @@ canvas.addEventListener('mousedown', () => {
 });
 document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === canvas;
-  if (!MOBILE && !pointerLocked && game.running && !game.busted && !game.paused) setPaused(true);
+  if (!MOBILE && !pointerLocked && game.running && !game.busted && !game.paused && !game.uiOpen) setPaused(true);
 });
 document.addEventListener('mousemove', (e) => {
   if (!pointerLocked) return;
@@ -202,6 +233,7 @@ document.addEventListener('mousemove', (e) => {
 });
 
 function setPaused(on) {
+  if (on && game.uiOpen) return;
   game.paused = on;
   $('pause').classList.toggle('hidden', !on);
 }
@@ -353,6 +385,762 @@ function toast(text, kind = '', icon = '') {
 }
 
 /* ------------------------------------------------------------------ */
+/* Username, friends and online sessions                               */
+/* ------------------------------------------------------------------ */
+const online = new OnlineSession({
+  onStatus(status) { updateNetUI(status); },
+  onInvite(invite) {
+    if (social.session || social.pendingInvite) return;
+    social.pendingInvite = { ...invite, voted: false, choice: '' };
+    openVoteOverlay('guest');
+  },
+  onVoteUpdate(summary) {
+    renderVoteTally(summary);
+    if (social.hostVoting && online.allVoted()) resolveHostVote();
+  },
+  onSessionStart(data) {
+    online.joinReceivedSession(data);
+    beginSquadSession(data);
+  },
+  onSnapshot(states) { applyRemoteSnapshot(states); },
+  onSessionEnd(reason) { endSessionLocally(reason); },
+  onPlayerLeft(id) {
+    removeRemote(id);
+    updatePartyPill();
+    if (social.session) {
+      social.session.players = social.session.players.filter((p) => p.id !== id);
+      toast('A rider left the squad', '', '◎');
+    }
+  },
+});
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function loadFriends() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FRIENDS_KEY) || '[]');
+    return Array.isArray(raw) ? raw.map(cleanUsername).filter((n) => n.length >= 3).slice(0, 40) : [];
+  } catch { return []; }
+}
+
+function saveFriends() {
+  try { localStorage.setItem(FRIENDS_KEY, JSON.stringify(social.friends)); } catch { /* private mode */ }
+}
+
+function overlayOpen() {
+  return ['username-overlay', 'friends-overlay', 'invite-overlay', 'vote-overlay']
+    .some((id) => !$(id).classList.contains('hidden'));
+}
+
+function showOverlay(id) {
+  $(id).classList.remove('hidden');
+  if (game.running && !game.busted) {
+    game.uiOpen = true;
+    game.paused = true;
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+}
+
+function hideOverlay(id) {
+  $(id).classList.add('hidden');
+  if (overlayOpen()) return;
+  game.uiOpen = false;
+  if (game.running && !game.busted && $('pause').classList.contains('hidden')) {
+    game.paused = false;
+    if (!MOBILE) { try { canvas.requestPointerLock(); } catch { /* optional */ } }
+  }
+}
+
+function updateNetUI(status) {
+  const el = $('net-status');
+  if (!el) return;
+  el.classList.remove('online', 'offline', 'checking');
+  if (status === 'online') {
+    el.classList.add('online');
+    el.textContent = 'Online — friends can find you by name';
+  } else if (status === 'connecting' || status === 'reconnecting') {
+    el.textContent = status === 'reconnecting' ? 'Reconnecting…' : 'Connecting to the rider network…';
+  } else if (status === 'error') {
+    el.classList.add('offline');
+    el.textContent = 'Connection hiccup — try refreshing the page';
+  } else {
+    el.classList.add('offline');
+    el.textContent = 'Offline — check your internet connection';
+  }
+}
+
+function setLocalNameTag() {
+  if (localNameTag) {
+    if (localNameTag.parent) localNameTag.parent.remove(localNameTag);
+    localNameTag = null;
+  }
+  localNameTag = createNameTag(social.username || 'RIDER', { local: true });
+  localNameTag.scale.set(1.82, 0.455, 1);
+  localNameTag.position.y = 2.22;
+  playerHuman.root.add(localNameTag);
+}
+
+async function saveUsername(raw) {
+  const name = cleanUsername(raw);
+  const key = usernameKey(name);
+  const errorEl = $('username-error');
+  errorEl.textContent = '';
+  if (key.length < 3) { errorEl.textContent = 'Use at least 3 letters or numbers.'; return; }
+  if (key.length > 16) { errorEl.textContent = 'Keep it to 16 characters or fewer.'; return; }
+
+  const btn = $('username-save');
+  btn.disabled = true;
+  btn.textContent = 'CONNECTING…';
+  try {
+    if (!TEST_MODE) await online.connect(name);
+    social.username = name;
+    game.username = name;
+    try { localStorage.setItem(USERNAME_KEY, name); } catch { /* private mode */ }
+    $('friend-me').textContent = name;
+    setLocalNameTag();
+    hideOverlay('username-overlay');
+    updateNetUI(online.status);
+    if (!TEST_MODE) refreshPresence();
+    toast(`Riding as ${name}`, 'good', '◎');
+  } catch (err) {
+    errorEl.textContent = err.message || 'Could not connect. Try again.';
+    updateNetUI('offline');
+    online.disconnect();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'START RIDING';
+  }
+}
+
+function addFriend(raw) {
+  const name = cleanUsername(raw);
+  const key = usernameKey(name);
+  if (key.length < 3) { toast('Friend names need at least 3 letters', 'bad', '!'); return false; }
+  if (key === usernameKey(social.username)) { toast('That is your own rider name', 'bad', '!'); return false; }
+  if (social.friends.some((f) => usernameKey(f) === key)) { toast('Already in your friends list', '', '◎'); return false; }
+  social.friends.push(name);
+  social.friends.sort((a, b) => a.localeCompare(b));
+  saveFriends();
+  renderFriends();
+  refreshPresence();
+  toast(`${name} added`, 'good', '◎');
+  return true;
+}
+
+function removeFriend(name) {
+  social.friends = social.friends.filter((f) => usernameKey(f) !== usernameKey(name));
+  social.statuses.delete(name);
+  saveFriends();
+  renderFriends();
+}
+
+function renderFriends() {
+  const list = $('friends-list');
+  if (!list) return;
+  let onlineCount = 0;
+  for (const name of social.friends) {
+    if (social.statuses.get(name) === 'online') onlineCount++;
+  }
+  $('friends-count').textContent = String(onlineCount);
+  if (!social.friends.length) {
+    list.innerHTML = '<div class="menu-empty">No friends yet. Add a rider name above.</div>';
+    return;
+  }
+  list.innerHTML = social.friends.map((name) => {
+    const status = social.statuses.get(name) || 'unknown';
+    const label = status === 'online' ? 'ONLINE' : status === 'checking' ? 'CHECKING' : 'OFFLINE';
+    return `<div class="friend-row ${status === 'online' ? 'online' : status === 'checking' ? 'checking' : ''}">
+      <span class="friend-dot"></span>
+      <span class="friend-name">${esc(name)}</span>
+      <span class="friend-state">${label}</span>
+      <button class="friend-remove" data-friend="${esc(name)}" title="Remove friend">×</button>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.friend-remove').forEach((btn) => {
+    btn.addEventListener('click', () => removeFriend(btn.dataset.friend));
+  });
+}
+
+function renderInviteList() {
+  const list = $('invite-list');
+  if (!list) return;
+  if (!social.friends.length) {
+    list.innerHTML = '';
+    $('invite-empty').classList.remove('hidden');
+    $('invite-empty').textContent = 'No friends yet. Add friends from the start screen.';
+    return;
+  }
+  const onlineFriends = social.friends.filter((n) => social.statuses.get(n) === 'online');
+  $('invite-empty').classList.toggle('hidden', onlineFriends.length > 0);
+  if (!onlineFriends.length) {
+    $('invite-empty').textContent = social.presenceBusy
+      ? 'Checking who is online…'
+      : 'Nobody is online right now. Ask your friend to open the game.';
+  }
+  list.innerHTML = social.friends.map((name) => {
+    const status = social.statuses.get(name) || 'unknown';
+    const onlineNow = status === 'online';
+    const checked = social.inviteSelection.has(name) ? 'checked' : '';
+    const label = onlineNow ? 'ONLINE' : status === 'checking' ? 'CHECKING' : 'OFFLINE';
+    return `<label class="friend-row ${onlineNow ? 'online' : status === 'checking' ? 'checking' : ''}">
+      <input type="checkbox" class="invite-pick" data-invite="${esc(name)}" ${checked} ${onlineNow ? '' : 'disabled'} />
+      <span class="friend-name">${esc(name)}</span>
+      <span class="friend-state">${label}</span>
+    </label>`;
+  }).join('');
+  list.querySelectorAll('.invite-pick').forEach((box) => {
+    box.addEventListener('change', () => {
+      if (box.checked) social.inviteSelection.add(box.dataset.invite);
+      else social.inviteSelection.delete(box.dataset.invite);
+    });
+  });
+}
+
+async function refreshPresence() {
+  if (!social.friends.length || !online.peer || !online.peer.open || social.presenceBusy) return;
+  social.presenceBusy = true;
+  for (const name of social.friends) social.statuses.set(name, 'checking');
+  renderFriends();
+  renderInviteList();
+  const queue = [...social.friends];
+  const worker = async () => {
+    while (queue.length) {
+      const name = queue.shift();
+      const ok = await online.probe(name);
+      social.statuses.set(name, ok ? 'online' : 'offline');
+      renderFriends();
+      renderInviteList();
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  social.presenceBusy = false;
+  renderFriends();
+  renderInviteList();
+}
+
+function openFriendsPanel() {
+  $('friend-me').textContent = social.username || '—';
+  updateNetUI(online.status);
+  renderFriends();
+  showOverlay('friends-overlay');
+  refreshPresence();
+}
+
+function openInvitePanel() {
+  if (social.session) {
+    toast('You are already in a squad — leave it first', '', '◎');
+    openFriendsPanel();
+    return;
+  }
+  if (!online.peer || !online.peer.open) {
+    toast('You are offline — check your connection', 'bad', '!');
+    return;
+  }
+  social.inviteSelection.clear();
+  renderInviteList();
+  showOverlay('invite-overlay');
+  refreshPresence();
+}
+
+function openVoteOverlay(kind) {
+  const host = kind === 'host';
+  $('vote-kicker').textContent = host ? 'SQUAD INVITED' : 'INVITE FROM A FRIEND';
+  $('vote-title').textContent = host ? 'CITY OR RACE?' : `${social.pendingInvite?.from || 'A rider'} wants to ride`;
+  $('vote-sub').textContent = host
+    ? 'Your friends are choosing too. Pick what you want, then the squad rolls out together.'
+    : `You have been invited to a squad of ${social.pendingInvite?.partySize || 2}. Pick the plan, then wait for the host.`;
+  $('vote-cancel').textContent = host ? 'CANCEL INVITE' : 'DECLINE INVITE';
+  document.querySelectorAll('.vote-option').forEach((el) => {
+    el.classList.remove('chosen');
+    el.disabled = false;
+  });
+  $('vote-tally').textContent = host ? 'Waiting for your friends to connect…' : 'Waiting for votes…';
+  showOverlay('vote-overlay');
+  $('vote-overlay').dataset.kind = kind;
+}
+
+function renderVoteTally(summary) {
+  const label = summary.voted >= summary.total && summary.total > 0
+    ? 'All votes in — rolling out…'
+    : `${summary.voted} / ${summary.total} voted`;
+  $('vote-tally').textContent = `${label}   ·   CITY ${summary.city} — RACE ${summary.race}`;
+}
+
+function markVoteChoice(choice) {
+  document.querySelectorAll('.vote-option').forEach((el) => {
+    el.classList.toggle('chosen', el.dataset.vote === choice);
+    el.disabled = true;
+  });
+}
+
+function resolveHostVote() {
+  if (!social.hostVoting) return;
+  social.hostVoting = false;
+  clearTimeout(social.voteTimer);
+  social.voteTimer = 0;
+  const mode = online.chooseVoteResult();
+  const spawn = { x: player.position.x, z: player.position.z, heading: player.heading };
+  const data = online.startHostedSession(mode, spawn);
+  hideOverlay('vote-overlay');
+  if (!data || data.players.length < 2) {
+    if (online.cancelInvite) online.cancelInvite();
+    toast('Nobody joined — invite a friend who is online', 'bad', '!');
+    return;
+  }
+  beginSquadSession(data);
+}
+
+function declineInvite() {
+  social.pendingInvite = null;
+  if (online.declineInvite) online.declineInvite();
+  hideOverlay('vote-overlay');
+  toast('Invite declined', '', '◎');
+}
+
+function sendSquadInvites() {
+  const names = [...social.inviteSelection];
+  if (!names.length) { toast('Pick at least one friend', 'bad', '!'); return; }
+  hideOverlay('invite-overlay');
+  social.hostVoting = true;
+  openVoteOverlay('host');
+  online.sendInvites(names).then((res) => {
+    if (!social.hostVoting) return;
+    if (!res.invited.length) {
+      social.hostVoting = false;
+      hideOverlay('vote-overlay');
+      toast('Those friends are offline — nobody got the invite', 'bad', '!');
+      return;
+    }
+    $('vote-sub').textContent = `${res.invited.length} friend${res.invited.length > 1 ? 's' : ''} invited. Pick CITY or RACE, then the squad rolls out.`;
+    const summary = online._voteSummary();
+    renderVoteTally(summary);
+    clearTimeout(social.voteTimer);
+    social.voteTimer = setTimeout(() => { if (social.hostVoting) resolveHostVote(); }, 20000);
+  }).catch(() => {
+    social.hostVoting = false;
+    hideOverlay('vote-overlay');
+    toast('Could not send the invites — try again', 'bad', '!');
+  });
+}
+
+function beginSquadSession(data) {
+  hideOverlay('vote-overlay');
+  hideOverlay('invite-overlay');
+  hideOverlay('friends-overlay');
+  social.pendingInvite = null;
+  social.hostVoting = false;
+  clearTimeout(social.voteTimer);
+  social.session = data;
+  setUpRemotes(data.players || []);
+  if (data.mode === 'race') enterRaceMode(data);
+  else enterCityMode(data);
+  updatePartyPill();
+  toast(`Squad rolling — ${data.players.length} riders, ${data.mode === 'race' ? 'Harbor Ring' : 'Lemon City'}`, 'good', '◎');
+}
+
+function endSessionLocally(reason) {
+  const wasRacing = game.mode === 'race';
+  social.session = null;
+  online.session = null;
+  clearRemotes();
+  social.hostVoting = false;
+  clearTimeout(social.voteTimer);
+  hideOverlay('vote-overlay');
+  updatePartyPill();
+  if (wasRacing) returnToCityLocal();
+  if (reason) toast(reason, '', '◎');
+}
+
+function leaveSquad(showToast = true) {
+  const wasRacing = game.mode === 'race';
+  if (social.session) online.leave();
+  social.session = null;
+  clearRemotes();
+  updatePartyPill();
+  hideOverlay('friends-overlay');
+  hideOverlay('invite-overlay');
+  hideOverlay('vote-overlay');
+  if (wasRacing) returnToCityLocal();
+  if (showToast) toast('Left the squad session', '', '◎');
+}
+
+function updatePartyPill() {
+  const count = social.session ? social.session.players.length : 0;
+  $('party-pill').classList.toggle('hidden', count === 0);
+  if (count) $('party-text').textContent = `SQUAD · ${count}`;
+  $('session-leave').classList.toggle('hidden', count === 0);
+  $('invite-btn').classList.toggle('waiting', count > 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Remote riders and squad scenes                                      */
+/* ------------------------------------------------------------------ */
+const REMOTE_SHIRTS = ['#e0584a', '#3f8fd8', '#e0a93c', '#7f5ad6', '#3fb98a', '#d65a94', '#57a7c9', '#c9763c'];
+const REMOTE_PANTS = ['#2c3440', '#3a3042', '#26332f', '#403528', '#2a2a38'];
+const REMOTE_SKINS = ['#c98f6b', '#8d5a3c', '#e2b18c', '#6d452c', '#b57752'];
+const REMOTE_HAIR = ['#201812', '#3b2a1c', '#101014', '#5a3a22', '#2c1d14'];
+
+function hashName(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h;
+}
+
+function activeScene() {
+  return game.mode === 'race' && raceWorld ? raceWorld.scene : scene;
+}
+
+function moveToScene(object, dest) {
+  if (!object || !dest) return;
+  if (object.parent) object.parent.remove(object);
+  dest.add(object);
+}
+
+function createRemotePlayer(info) {
+  const h = hashName(info.name || info.id);
+  const human = createHumanoid({
+    detail: MOBILE ? 'low' : 'high',
+    shadow: false,
+    shirt: REMOTE_SHIRTS[h % REMOTE_SHIRTS.length],
+    pants: REMOTE_PANTS[h % REMOTE_PANTS.length],
+    skin: REMOTE_SKINS[h % REMOTE_SKINS.length],
+    hair: REMOTE_HAIR[h % REMOTE_HAIR.length],
+  });
+  human.root.visible = false;
+  const tag = createNameTag(info.name || 'RIDER');
+  human.root.add(tag);
+  const scooter = createScooter(activeScene());
+  scooter.root.visible = false;
+  const remote = {
+    id: info.id,
+    name: info.name || 'RIDER',
+    human,
+    scooter,
+    state: null,
+    riding: null,
+  };
+  return remote;
+}
+
+function setUpRemotes(players) {
+  clearRemotes();
+  for (const p of players) {
+    if (!p || p.id === online.id) continue;
+    const remote = createRemotePlayer(p);
+    social.remotes.set(p.id, remote);
+  }
+}
+
+function removeRemote(id) {
+  const remote = social.remotes.get(id);
+  if (!remote) return;
+  if (remote.human.root.parent) remote.human.root.parent.remove(remote.human.root);
+  if (remote.scooter.root.parent) remote.scooter.root.parent.remove(remote.scooter.root);
+  social.remotes.delete(id);
+}
+
+function clearRemotes() {
+  for (const id of [...social.remotes.keys()]) removeRemote(id);
+}
+
+function setRemoteRiding(remote, riding) {
+  if (remote.riding === riding) return;
+  remote.riding = riding;
+  const dest = activeScene();
+  if (riding) {
+    if (remote.human.root.parent) remote.human.root.parent.remove(remote.human.root);
+    remote.human.root.position.set(0, 0, 0);
+    remote.human.root.rotation.set(0, 0, 0);
+    remote.scooter.riderAttach.add(remote.human.root);
+    remote.human.riding = true;
+    remote.human.sitting = false;
+    remote.human.root.visible = true;
+    if (remote.scooter.root.parent !== dest) moveToScene(remote.scooter.root, dest);
+  } else {
+    if (remote.human.root.parent) remote.human.root.parent.remove(remote.human.root);
+    remote.human.riding = false;
+    remote.human.root.visible = true;
+    dest.add(remote.human.root);
+  }
+}
+
+function applyRemoteSnapshot(states) {
+  for (const state of states) {
+    if (!state || !state.id || state.id === online.id) continue;
+    let remote = social.remotes.get(state.id);
+    if (!remote) {
+      remote = createRemotePlayer({ id: state.id, name: state.name });
+      social.remotes.set(state.id, remote);
+    }
+    remote.state = state;
+    remote.name = state.name || remote.name;
+  }
+  social.lastRemoteUpdate = performance.now();
+}
+
+function updateRemotes(dt) {
+  const now = performance.now();
+  for (const remote of social.remotes.values()) {
+    const state = remote.state;
+    if (!state) continue;
+    if (now - social.lastRemoteUpdate > 6000) continue;
+    const y = game.mode === 'race' ? 0 : groundHeightAt(state.x, state.z);
+    if (state.riding) {
+      setRemoteRiding(remote, true);
+      remote.scooter.root.visible = true;
+      remote.scooter.root.position.lerp(new THREE.Vector3(state.x, y, state.z), 1 - Math.exp(-11 * dt));
+      remote.scooter.root.rotation.y = dampAngle(remote.scooter.root.rotation.y, state.heading || 0, 11, dt);
+      updateScooterVisual(remote.scooter, {
+        speed: state.speed || 0,
+        steerInput: 0,
+        wheelieAngle: state.wheelie || 0,
+        dt,
+      });
+    } else {
+      setRemoteRiding(remote, false);
+      remote.scooter.root.visible = false;
+      remote.human.root.position.lerp(new THREE.Vector3(state.x, y, state.z), 1 - Math.exp(-11 * dt));
+      remote.human.root.rotation.y = dampAngle(remote.human.root.rotation.y, state.heading || 0, 11, dt);
+      remote.human.animate(dt, Math.abs(state.speed || 0));
+    }
+  }
+}
+
+function sendLocalState(now) {
+  if (!social.session || !online.peer || !online.peer.open) return;
+  if (now - social.lastStateSent < 100) return;
+  social.lastStateSent = now;
+  const race = game.raceState;
+  online.sendState({
+    id: online.id,
+    name: social.username,
+    x: player.position.x,
+    z: player.position.z,
+    heading: player.heading,
+    riding: !player.onFoot,
+    speed: player.speed,
+    wheelie: player.wheelie,
+    wanted: game.stars,
+    lap: race ? race.lap : 1,
+    nextGate: race ? race.nextGate : 0,
+    finished: !!(race && race.finished),
+    finishTime: race ? race.finishTime : 0,
+  });
+}
+
+function slotForLocal(data) {
+  const me = (data.players || []).find((p) => p.id === online.id);
+  return me ? me.slot : 0;
+}
+
+function enterCityMode(data) {
+  game.mode = 'city';
+  game.raceState = null;
+  document.querySelector('.minimap-wrap').classList.remove('hidden');
+  $('race-hud').classList.add('hidden');
+  $('race-results').classList.add('hidden');
+  $('race-count').classList.add('hidden');
+  $('siren-flash').style.display = 'none';
+  if (!online.isHost && data.spawn) {
+    if (player.onFoot) mountScooter(true);
+    const slot = slotForLocal(data);
+    const angle = (slot / Math.max(1, data.players.length)) * Math.PI * 2;
+    const x = data.spawn.x + Math.cos(angle) * 7;
+    const z = data.spawn.z + Math.sin(angle) * 7;
+    player.position.set(x, 0, z);
+    player.heading = data.spawn.heading || 0;
+    player.speed = 0;
+    scooter.root.position.set(x, groundHeightAt(x, z), z);
+    scooter.root.rotation.y = player.heading;
+  }
+  moveToScene(scooter.root, scene);
+  if (player.onFoot) moveToScene(playerHuman.root, scene);
+  for (const remote of social.remotes.values()) {
+    if (remote.riding) moveToScene(remote.scooter.root, scene);
+    else moveToScene(remote.human.root, scene);
+  }
+}
+
+function ensureRaceWorld() {
+  if (!raceWorld) raceWorld = createRace();
+  return raceWorld;
+}
+
+function enterRaceMode(data) {
+  const race = ensureRaceWorld();
+  if (game.mode === 'city') {
+    social.cityReturn = {
+      x: player.position.x, z: player.position.z, heading: player.heading,
+    };
+  }
+  game.mode = 'race';
+  if (player.onFoot) mountScooter(true);
+  const slot = slotForLocal(data);
+  const pose = race.gridPose(slot);
+  player.position.set(pose.x, 0, pose.z);
+  player.heading = pose.yaw;
+  player.speed = 0;
+  player.wheelie = 0;
+  scooter.root.position.set(pose.x, 0, pose.z);
+  scooter.root.rotation.y = pose.yaw;
+  scooter.root.visible = true;
+  game.raceState = {
+    lap: 1,
+    nextGate: 0,
+    finished: false,
+    finishTime: 0,
+    startAt: data.startAt || Date.now() + 4200,
+    slot,
+    resultsShown: false,
+    lastHud: 0,
+  };
+  moveToScene(scooter.root, race.scene);
+  for (const remote of social.remotes.values()) {
+    if (remote.riding) moveToScene(remote.scooter.root, race.scene);
+    else moveToScene(remote.human.root, race.scene);
+  }
+  document.querySelector('.minimap-wrap').classList.add('hidden');
+  $('race-hud').classList.remove('hidden');
+  $('race-results').classList.add('hidden');
+  $('race-count').classList.remove('hidden');
+  $('siren-flash').style.display = 'none';
+  updateRaceHud();
+}
+
+function returnToCityLocal() {
+  if (game.mode !== 'race') return;
+  game.mode = 'city';
+  game.raceState = null;
+  const back = social.cityReturn || { x: 0, z: 8, heading: 0 };
+  player.position.set(back.x, groundHeightAt(back.x, back.z), back.z);
+  player.heading = back.heading || 0;
+  player.speed = 0;
+  player.wheelie = 0;
+  scooter.root.position.set(back.x, player.position.y, back.z);
+  scooter.root.rotation.y = player.heading;
+  moveToScene(scooter.root, scene);
+  for (const remote of social.remotes.values()) {
+    if (remote.riding) moveToScene(remote.scooter.root, scene);
+    else moveToScene(remote.human.root, scene);
+  }
+  document.querySelector('.minimap-wrap').classList.remove('hidden');
+  $('race-hud').classList.add('hidden');
+  $('race-results').classList.add('hidden');
+  $('race-count').classList.add('hidden');
+  $('siren-flash').style.display = 'none';
+}
+
+function raceStandings() {
+  const local = game.raceState;
+  const entries = [{
+    id: online.id || 'me',
+    name: social.username || 'YOU',
+    you: true,
+    finished: !!(local && local.finished),
+    finishTime: local ? local.finishTime : 0,
+    progress: local ? local.lap * 10 + local.nextGate : 0,
+  }];
+  for (const remote of social.remotes.values()) {
+    const s = remote.state;
+    if (!s) continue;
+    entries.push({
+      id: remote.id,
+      name: remote.name,
+      you: false,
+      finished: !!s.finished,
+      finishTime: s.finishTime || 0,
+      progress: (s.lap || 1) * 10 + (s.nextGate || 0),
+    });
+  }
+  entries.sort((a, b) => {
+    if (a.finished && b.finished) return a.finishTime - b.finishTime;
+    if (a.finished) return -1;
+    if (b.finished) return 1;
+    return b.progress - a.progress;
+  });
+  return entries;
+}
+
+function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function updateRaceHud() {
+  const race = game.raceState;
+  if (!race) return;
+  $('race-lap').textContent = `LAP ${Math.min(race.lap, RACE.laps)} / ${RACE.laps}`;
+  const standings = raceStandings();
+  const myIndex = standings.findIndex((e) => e.you);
+  $('race-place').textContent = `${ordinal(myIndex + 1)} / ${standings.length}`;
+  if (race.finished && !race.resultsShown) showRaceResults(standings);
+  if (race.resultsShown && performance.now() - race.lastHud > 700) {
+    race.lastHud = performance.now();
+    showRaceResults(standings, true);
+  }
+}
+
+function showRaceResults(standings, refresh = false) {
+  const race = game.raceState;
+  if (!race) return;
+  race.resultsShown = true;
+  $('race-results').classList.remove('hidden');
+  $('race-results').innerHTML = `<b>FINISH</b>${standings.slice(0, 8).map((e, i) => (
+    `<div class="race-row ${e.you ? 'you' : ''}"><span>${i + 1}</span><span>${esc(e.name)}</span><em>${e.finished ? 'FINISHED' : 'RACING'}</em></div>`
+  )).join('')}<small>Press LEAVE to head back to Lemon City</small>`;
+  if (!refresh) toast('Race complete!', 'good', '★');
+}
+
+function updateGameRace(dt) {
+  const race = game.raceState;
+  if (!race) return;
+  game.time += dt;
+  const now = Date.now();
+  if (now < race.startAt) {
+    player.speed = 0;
+    const left = Math.ceil((race.startAt - now) / 1000);
+    $('race-count').textContent = String(Math.max(1, left));
+    $('race-count').classList.remove('hidden');
+  } else {
+    $('race-count').classList.add('hidden');
+  }
+  updateRiding(dt);
+  if (now >= race.startAt && !race.finished) {
+    const gate = race.nextGate < RACE.checkpointTs.length
+      ? raceWorld.checkpoints[race.nextGate]
+      : raceWorld.finish;
+    const radius = race.nextGate < RACE.checkpointTs.length ? 11 : 13;
+    if (dist2D(player.position.x, player.position.z, gate.x, gate.z) < radius) {
+      race.nextGate++;
+      if (race.nextGate > RACE.checkpointTs.length) {
+        race.nextGate = 0;
+        if (race.lap >= RACE.laps) {
+          race.finished = true;
+          race.finishTime = now;
+          player.speed = 0;
+          toast('You crossed the finish line!', 'good', '★');
+        } else {
+          race.lap++;
+          toast(`Lap ${race.lap} of ${RACE.laps}`, '', '★');
+        }
+      }
+    }
+  }
+  updateCamera(dt);
+  audio.update(dt, {
+    riding: !player.onFoot, speed: player.speed,
+    throttle: input.forward, wheelie: player.wheelie,
+  });
+  if (performance.now() - race.lastHud > 250) {
+    race.lastHud = performance.now();
+    updateRaceHud();
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 function groundHeightAt(x, z) {
@@ -379,6 +1167,11 @@ function collidesAt(x, z, radius) {
 function moveCircle(pos, dx, dz, radius) {
   pos.x += dx;
   pos.z += dz;
+  if (game.mode === 'race') {
+    pos.x = clamp(pos.x, -172, 172);
+    pos.z = clamp(pos.z, -132, 132);
+    return;
+  }
   for (const c of world.colliders) {
     if (pos.x + radius < c.minX || pos.x - radius > c.maxX || pos.z + radius < c.minZ || pos.z - radius > c.maxZ) continue;
     resolveCircleAABB(pos, radius, c);
@@ -386,9 +1179,6 @@ function moveCircle(pos, dx, dz, radius) {
   pos.x = clamp(pos.x, -CITY.half + 0.8, CITY.half - 0.8);
   pos.z = clamp(pos.z, -CITY.half + 0.8, CITY.half - 0.8);
 }
-
-let nearScooter = false;
-let nearShop = null;
 
 function nearestShopAt(x, z, maxDist = 3.6) {
   let best = null, bd = maxDist;
@@ -667,6 +1457,10 @@ function updateRiding(dt) {
     if (Math.abs(speed) < 0.04) speed = 0;
   }
 
+  const raceHeld = game.mode === 'race' && game.raceState
+    && (Date.now() < game.raceState.startAt || game.raceState.finished);
+  if (raceHeld) speed = 0;
+
   if (Math.abs(speed) > 0.25) {
     const turn = 2.15 / (1 + Math.abs(speed) * 0.045);
     p.heading += steer * turn * dt * clamp(Math.abs(speed) / 4.2, 0.28, 1) * Math.sign(speed);
@@ -698,7 +1492,7 @@ function updateRiding(dt) {
     p.wheelieActive = false;
     p.wheelieScored = false;
   }
-  if (p.wheelieActive && p.wheelie > 0.42 && !p.wheelieScored) {
+  if (game.mode !== 'race' && p.wheelieActive && p.wheelie > 0.42 && !p.wheelieScored) {
     const nc = nearestCop(crowd, p.position.x, p.position.z);
     if (nc.cop && nc.dist < 34 && copSeesPlayer(nc.cop)) {
       p.wheelieScored = true;
@@ -708,7 +1502,7 @@ function updateRiding(dt) {
   }
 
   p.speed = speed;
-  const gy = groundHeightAt(p.position.x, p.position.z);
+  const gy = game.mode === 'race' ? 0 : groundHeightAt(p.position.x, p.position.z);
   scooter.root.position.set(p.position.x, gy, p.position.z);
   scooter.root.rotation.y = p.heading;
   scooter.root.visible = true;
@@ -783,6 +1577,13 @@ function updateHUD(dt) {
     $('wheelie-fill').style.width = `${(player.wheelie / 0.95) * 100}%`;
     $('wheelie-angle').textContent = `${deg}°`;
   }
+
+  if (game.mode === 'race') {
+    promptEl.classList.add('hidden');
+    document.querySelector('.minimap-wrap').classList.add('hidden');
+    return;
+  }
+  document.querySelector('.minimap-wrap').classList.remove('hidden');
 
   nearScooter = game.scooterSpawned && player.onFoot &&
     dist2D(player.position.x, player.position.z, scooter.root.position.x, scooter.root.position.z) < 3.4;
@@ -927,6 +1728,10 @@ let lastFrame = performance.now();
 let introTime = 0;
 
 function updateGame(dt) {
+  if (game.mode === 'race') {
+    updateGameRace(dt);
+    return;
+  }
   game.time += dt;
   if (player.onFoot) updateOnFoot(dt);
   else updateRiding(dt);
@@ -950,7 +1755,11 @@ function animate(now) {
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
   if (game.running) {
-    if (!game.paused && !game.busted) updateGame(dt);
+    if (!game.paused && !game.busted) {
+      updateGame(dt);
+      updateRemotes(dt);
+    }
+    sendLocalState(now);
     updateHUD(dt);
   } else {
     introTime += dt;
@@ -958,7 +1767,7 @@ function animate(now) {
     camera.position.set(Math.cos(a) * 108, 52 + Math.sin(introTime * 0.25) * 4, Math.sin(a) * 108);
     camera.lookAt(0, 12, 0);
   }
-  renderer.render(scene, camera);
+  renderer.render(activeScene(), camera);
 }
 requestAnimationFrame(animate);
 
@@ -971,6 +1780,108 @@ function onResize() {
 }
 window.addEventListener('resize', onResize);
 window.addEventListener('orientationchange', () => setTimeout(onResize, 120));
+
+/* ------------------------------------------------------------------ */
+/* Social UI binding                                                   */
+/* ------------------------------------------------------------------ */
+$('username-save').addEventListener('click', () => saveUsername($('username-input').value));
+$('username-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); saveUsername($('username-input').value); }
+});
+
+$('friends-btn').addEventListener('click', openFriendsPanel);
+$('friends-close').addEventListener('click', () => hideOverlay('friends-overlay'));
+$('change-name').addEventListener('click', () => {
+  hideOverlay('friends-overlay');
+  $('username-input').value = social.username || '';
+  $('username-error').textContent = '';
+  showOverlay('username-overlay');
+  setTimeout(() => $('username-input').focus(), 30);
+});
+$('add-friend-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('add-friend-input');
+  if (addFriend(input.value)) input.value = '';
+});
+$('session-leave').addEventListener('click', () => leaveSquad());
+
+$('invite-btn').addEventListener('click', openInvitePanel);
+$('invite-close').addEventListener('click', () => hideOverlay('invite-overlay'));
+$('invite-send').addEventListener('click', sendSquadInvites);
+
+document.querySelectorAll('.vote-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const choice = btn.dataset.vote === 'race' ? 'race' : 'city';
+    if (social.pendingInvite) {
+      if (social.pendingInvite.voted) return;
+      social.pendingInvite.voted = true;
+      social.pendingInvite.choice = choice;
+      online.vote(choice);
+      markVoteChoice(choice);
+      $('vote-tally').textContent = 'Vote sent — waiting for the host…';
+      return;
+    }
+    if (social.hostVoting) {
+      online.vote(choice);
+      markVoteChoice(choice);
+      if (online.allVoted()) resolveHostVote();
+    }
+  });
+});
+$('vote-cancel').addEventListener('click', () => {
+  if (social.hostVoting) {
+    social.hostVoting = false;
+    clearTimeout(social.voteTimer);
+    if (online.cancelInvite) online.cancelInvite();
+    hideOverlay('vote-overlay');
+    toast('Invite cancelled', '', '◎');
+  } else {
+    declineInvite();
+  }
+});
+$('race-leave').addEventListener('click', () => leaveSquad());
+
+async function connectOnline() {
+  if (!social.username || TEST_MODE) return;
+  try {
+    await online.connect(social.username);
+    updateNetUI(online.status);
+    refreshPresence();
+  } catch (err) {
+    updateNetUI('offline');
+    if (/already online/i.test(err.message || '')) {
+      $('username-input').value = social.username;
+      $('username-error').textContent = err.message;
+      showOverlay('username-overlay');
+    }
+  }
+}
+
+function initIdentity() {
+  social.friends = loadFriends();
+  renderFriends();
+  let saved = '';
+  try { saved = cleanUsername(localStorage.getItem(USERNAME_KEY) || ''); } catch { saved = ''; }
+  if (saved.length >= 3) {
+    social.username = saved;
+    game.username = saved;
+    $('friend-me').textContent = saved;
+    hideOverlay('username-overlay');
+    setLocalNameTag();
+    connectOnline();
+  } else if (TEST_MODE) {
+    social.username = 'TESTRIDER';
+    game.username = 'TESTRIDER';
+    $('friend-me').textContent = 'TESTRIDER';
+    hideOverlay('username-overlay');
+    setLocalNameTag();
+  } else {
+    showOverlay('username-overlay');
+    setTimeout(() => $('username-input').focus(), 60);
+  }
+  updateNetUI(online.status);
+  updatePartyPill();
+}
 
 /* ------------------------------------------------------------------ */
 /* Start / pause / test                                                */
@@ -1045,8 +1956,13 @@ async function runSelfTest() {
   step(0.5);
   const starsBeforeWheelie = game.stars;
   keys.add('Space'); syncInput();
-  step(0.55);
+  step(0.22);
   t('wheelie lifts', player.wheelie > 0.25, player.wheelie.toFixed(2));
+  // Stake the witness right behind the rider again: crowd patrol may have
+  // walked it out of view during the throttle step.
+  witness.human.root.position.set(player.position.x, 0.24, player.position.z + 6);
+  witness.human.root.rotation.y = Math.PI;
+  step(1 / 30);
   t('cop sees the wheelie', copSeesPlayer(witness));
   t('wheelie adds star', game.stars > starsBeforeWheelie, game.stars);
   keys.delete('Space'); keys.delete('KeyW'); syncInput();
@@ -1080,12 +1996,17 @@ async function runSelfTest() {
   console.log('SELFTEST', payload);
 }
 
+initIdentity();
+
 if (TEST_MODE) setTimeout(runSelfTest, 120);
 
 window.__game = {
   game, player, scooter, world, crowd, camera, scene, renderer,
   mountScooter, getOffScooter, tryRob, addWanted, beginGame, updateGame,
   groundHeightAt, collidesAt, input, MOBILE, TEST_MODE,
+  online, social, enterRaceMode, returnToCityLocal, raceStandings,
+  get raceWorld() { return raceWorld; },
+  get localNameTag() { return localNameTag; },
 };
 
 

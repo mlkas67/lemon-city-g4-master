@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <script type="module" crossorigin src="./assets/index-DUJeXPcO.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-CK4Egw5t.css">
+  <script type="module" crossorigin src="./assets/index-Cl0p-Ldo.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-DTg5kvfc.css">
 </head>
 <body>
   <canvas id="scene"></canvas>
@@ -27,9 +27,12 @@
         </div>
       </div>
 
-      <div class="wanted" aria-label="Wanted level">
-        <div class="wanted-label">WANTED</div>
-        <div id="stars" class="stars"></div>
+      <div class="wanted-wrap">
+        <div class="wanted" aria-label="Wanted level">
+          <div class="wanted-label">WANTED</div>
+          <div id="stars" class="stars"></div>
+        </div>
+        <button id="invite-btn" class="invite-btn" title="Invite friends to ride">+ INVITE</button>
       </div>
 
       <div class="cash" id="cash">
@@ -41,6 +44,17 @@
     <div class="status-pills">
       <div class="pill" id="mode-pill"><i class="dot"></i><span id="mode-text">ON FOOT</span></div>
       <div class="pill hidden" id="ride-pill"><span id="ride-text">G4 MASTER</span><b id="speed-text">0</b><small>km/h</small></div>
+      <div class="pill party hidden" id="party-pill"><i class="dot"></i><span id="party-text">SQUAD</span></div>
+    </div>
+
+    <div id="race-hud" class="race-hud hidden">
+      <div class="race-top">
+        <div class="race-lap"><small>HARBOR RING</small><b id="race-lap">LAP 1 / 2</b></div>
+        <div class="race-pos" id="race-place">1st / 1</div>
+        <button id="race-leave" class="race-leave">LEAVE</button>
+      </div>
+      <div id="race-count" class="race-count hidden">3</div>
+      <div id="race-results" class="race-results hidden"></div>
     </div>
 
     <div class="minimap-wrap">
@@ -117,7 +131,10 @@
         <div><b>ROB</b><span>Hit shops for cash — every score raises your wanted level</span></div>
         <div><b>FLEX</b><span>Wheelie past a cop and watch the stars climb</span></div>
       </div>
-      <button id="start-btn" class="start-btn">ENTER THE CITY <span>→</span></button>
+      <div class="start-actions">
+        <button id="start-btn" class="start-btn">ENTER THE CITY <span>→</span></button>
+        <button id="friends-btn" class="start-ghost"><span class="ghost-icon">◎</span> FRIENDS <i id="friends-count">0</i></button>
+      </div>
       <div class="start-note desktop-note">Click to lock the mouse · <b>ESC</b> releases it · headphones recommended</div>
       <div class="start-note mobile-note">Drag to look · left stick to move · action buttons on the right</div>
     </div>
@@ -146,6 +163,76 @@
       <h2>PAUSED</h2>
       <p>Mouse released. Click to jump back in.</p>
       <button id="resume-btn">RESUME</button>
+    </div>
+  </div>
+
+  <div id="username-overlay" class="overlay">
+    <div class="menu-card username-card">
+      <div class="menu-kicker">WELCOME TO LEMON CITY</div>
+      <h2>PICK YOUR RIDER NAME</h2>
+      <p class="menu-sub">Your friends will see this above your rider. You only do this once.</p>
+      <input id="username-input" class="menu-input" maxlength="16" autocomplete="nickname" placeholder="e.g. AlexRider" />
+      <div id="username-error" class="menu-error"></div>
+      <button id="username-save" class="menu-primary">START RIDING</button>
+      <p class="menu-note">3–16 letters, numbers or _. Names must be unique while you are online.</p>
+    </div>
+  </div>
+
+  <div id="friends-overlay" class="overlay hidden">
+    <div class="menu-card friends-card">
+      <div class="menu-head">
+        <div>
+          <div class="menu-kicker">YOUR CREW</div>
+          <h2>FRIENDS</h2>
+        </div>
+        <button id="friends-close" class="menu-close" aria-label="Close friends">×</button>
+      </div>
+      <div class="identity-row">
+        <span>PLAYING AS <b id="friend-me">—</b></span>
+        <button id="change-name" class="link-btn">CHANGE</button>
+      </div>
+      <div id="net-status" class="net-status">Connecting…</div>
+      <form id="add-friend-form" class="add-friend">
+        <input id="add-friend-input" class="menu-input" maxlength="16" placeholder="Friend's rider name" autocomplete="off" />
+        <button class="menu-primary small" type="submit">ADD</button>
+      </form>
+      <div id="friends-list" class="friends-list"></div>
+      <p class="menu-note">Friends need to be online at the same time. You can invite them from the city with the INVITE button beside your wanted stars.</p>
+      <button id="session-leave" class="menu-danger hidden">LEAVE SQUAD SESSION</button>
+    </div>
+  </div>
+
+  <div id="invite-overlay" class="overlay hidden">
+    <div class="menu-card invite-card">
+      <div class="menu-head">
+        <div>
+          <div class="menu-kicker">SQUAD UP</div>
+          <h2>INVITE FRIENDS</h2>
+        </div>
+        <button id="invite-close" class="menu-close" aria-label="Close invite">×</button>
+      </div>
+      <p class="menu-sub">Pick who you want to ride with. They choose CITY or the RACE track, then the squad rolls out together.</p>
+      <div id="invite-list" class="friends-list"></div>
+      <div id="invite-empty" class="menu-empty">No friends online right now. Add friends from the start screen.</div>
+      <button id="invite-send" class="menu-primary">SEND INVITES</button>
+    </div>
+  </div>
+
+  <div id="vote-overlay" class="overlay hidden">
+    <div class="menu-card vote-card">
+      <div class="menu-kicker" id="vote-kicker">INVITE FROM A FRIEND</div>
+      <h2 id="vote-title">RIDE TOGETHER?</h2>
+      <p class="menu-sub" id="vote-sub">Choose what the squad does next.</p>
+      <div class="vote-options">
+        <button class="vote-option" data-vote="city">
+          <b>CITY</b><span>Free-roam Lemon City together — rob shops and pull wheelies as a crew.</span>
+        </button>
+        <button class="vote-option" data-vote="race">
+          <b>RACE</b><span>Head to Harbor Ring, a separate circuit, and race for two laps.</span>
+        </button>
+      </div>
+      <div id="vote-tally" class="vote-tally">Waiting for votes…</div>
+      <button id="vote-cancel" class="link-btn">DECLINE INVITE</button>
     </div>
   </div>
 
