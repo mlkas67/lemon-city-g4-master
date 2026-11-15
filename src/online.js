@@ -159,6 +159,13 @@ export class OnlineSession {
         this.pending.get(conn.peer)?.resolve(true);
         break;
       case 'invite':
+        // Never let a second invite steal the connection to the squad the
+        // rider is already in or already deciding on.
+        if (this.session || this.hostInvite) {
+          this._send(conn, { t: 'leave' });
+          setTimeout(() => { try { conn.close(); } catch { /* ignore */ } }, 250);
+          break;
+        }
         this.hostConn = conn;
         this.hostId = conn.peer;
         this.handlers.onInvite?.({
@@ -170,7 +177,9 @@ export class OnlineSession {
         });
         break;
       case 'vote':
-        if (this.isHost && this.hostInvite) {
+        // The host is not flagged isHost until the session starts, so the
+        // pending invite is what identifies it while votes are open.
+        if (this.hostInvite) {
           const entry = this.hostInvite.invited.get(conn.peer);
           if (entry) {
             entry.voted = true;
@@ -189,10 +198,14 @@ export class OnlineSession {
         break;
       case 'state':
         if (this.isHost && this.session) {
-          if (data.state && data.state.id) {
+          // Only a rider in this squad may move its own avatar.
+          if (data.state && data.state.id === conn.peer && this.sessionMembers.has(conn.peer)) {
             this.playerStates.set(data.state.id, data.state);
             const member = this.sessionMembers.get(data.state.id);
             if (member) member.name = data.state.name || member.name;
+            // The host does not receive snapshot packets, so it needs the
+            // rider's live state directly to move their avatar.
+            this.handlers.onPlayerState?.(data.state);
           }
           const now = performance.now();
           if (now - this.lastSnapshot > 90) this._broadcastSnapshot();
@@ -374,13 +387,24 @@ export class OnlineSession {
   }
 
   _emitVotes() {
+    if (this.hostInvite) {
+      const votes = { city: 0, race: 0 };
+      if (this.hostInvite.hostChoice) votes[this.hostInvite.hostChoice]++;
+      for (const entry of this.hostInvite.invited.values()) {
+        if (entry.voted && entry.choice) votes[entry.choice]++;
+      }
+      this.hostInvite.votes = votes;
+    }
     this.handlers.onVoteUpdate?.(this._voteSummary());
   }
 
   allVoted() {
     if (!this.hostInvite) return false;
     const invited = [...this.hostInvite.invited.values()];
-    return this.hostInvite.hostChoice !== null && invited.every((v) => v.voted);
+    // Never resolve before at least one friend has received the invite;
+    // an empty list would otherwise count as "everyone voted".
+    return this.hostInvite.hostChoice !== null && invited.length > 0
+      && invited.every((v) => v.voted);
   }
 
   chooseVoteResult() {

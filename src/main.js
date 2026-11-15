@@ -417,6 +417,7 @@ const online = new OnlineSession({
     beginSquadSession(data);
   },
   onSnapshot(states) { applyRemoteSnapshot(states); },
+  onPlayerState(state) { applyRemoteSnapshot([state]); },
   onSessionEnd(reason) { endSessionLocally(reason); },
   onPlayerLeft(id) {
     removeRemote(id);
@@ -747,6 +748,10 @@ function beginSquadSession(data) {
   social.hostVoting = false;
   clearTimeout(social.voteTimer);
   social.session = data;
+  // An invited friend may still be on the start screen or in the pause
+  // menu; the squad session should drop them straight onto the road.
+  if (!game.running) beginGame();
+  else if (!game.uiOpen) setPaused(false);
   setUpRemotes(data.players || []);
   if (data.mode === 'race') enterRaceMode(data);
   else enterCityMode(data);
@@ -2000,6 +2005,27 @@ async function runSelfTest() {
   updateHUD(1 / 60);
   t('prompt is visible', !promptEl.classList.contains('hidden'));
   t('minimap drawn', mmCanvas.width > 0, mmCanvas.width);
+
+  // Squad vote tally: the host vote counts, a friend's vote updates the
+  // tally, and the session only rolls once every invited rider voted.
+  const voteProbe = new OnlineSession({});
+  voteProbe.hostInvite = {
+    sessionId: 'selftest',
+    invited: new Map([['friend', { name: 'Friend', conn: null, voted: false, choice: null }]]),
+    votes: { city: 0, race: 0 },
+    hostChoice: null,
+  };
+  voteProbe.hostVote('race');
+  t('host vote is counted', voteProbe.hostInvite.votes.race === 1 && !voteProbe.allVoted(),
+    JSON.stringify(voteProbe.hostInvite.votes));
+  const friendVote = voteProbe.hostInvite.invited.get('friend');
+  friendVote.voted = true;
+  friendVote.choice = 'city';
+  voteProbe._emitVotes();
+  t('friend vote updates tally', voteProbe.hostInvite.votes.city === 1
+    && voteProbe.hostInvite.votes.race === 1, JSON.stringify(voteProbe.hostInvite.votes));
+  voteProbe.hostInvite.invited.clear();
+  t('empty invite cannot resolve', !voteProbe.allVoted());
 
   const payload = JSON.stringify(results, null, 1);
   const box = $('test-results');
